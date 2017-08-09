@@ -133,12 +133,13 @@ S0hat <- function(obj)
 setClass("aft", representation(args="list"), contains="mle2")
 
 aft <- function(formula, data, smooth.formula = NULL, df = 3,
-                 control = list(parscale = 1, maxit = 1000), init = NULL,
+                 control = list(), init = NULL,
                  weights = NULL, 
                  timeVar = "", time0Var = "", 
                  reltol=1.0e-8, trace = 0,
                  contrasts = NULL, subset = NULL, ...) {
     ## parse the event expression
+    control.default <- list(parscale = 1, maxit=1000)
     eventInstance <- eval(lhs(formula),envir=data)
     stopifnot(length(lhs(formula))>=2)
     eventExpr <- lhs(formula)[[length(lhs(formula))]]
@@ -203,7 +204,7 @@ aft <- function(formula, data, smooth.formula = NULL, df = 3,
     coef1 <- coef1[-1] # assumes intercept included in the formula; ignores smooth.formula
     pred1 <- predict(survreg1)
     data$logtstar <- log(time)    
-    ## data$logtstar <- log(time*pred1)    
+    ## data$logtstar <- log(time/pred1)    
     ## initial values and object for lpmatrix predictions
     lm.call <- mf
     lm.call[[1L]] <- as.name("lm")
@@ -268,6 +269,9 @@ aft <- function(formula, data, smooth.formula = NULL, df = 3,
         names(coef1) <- names(coef1b)
         }
     init <- c(coef1,coef0)
+    for (name  in names(control.default))
+        if (!(name %in% names(control)))
+            control[[name]] <- control.default[[name]]
     if (!is.null(control) && "parscale" %in% names(control)) {
       if (length(control$parscale)==1)
         control$parscale <- rep(control$parscale,length(init))
@@ -283,25 +287,70 @@ aft <- function(formula, data, smooth.formula = NULL, df = 3,
                  boundaryKnots=attr(design,"Boundary.knots"),
                  interiorKnots=attr(design,"knots"), design=design, designD=designD,
                  data=data, lm.obj = lm.obj, return_type="optim")
-    negll <- function(beta) {
-        localargs <- args
-        localargs$return_type <- "objective"
-        localargs$init <- beta
-        return(.Call("aft_model_output", localargs, PACKAGE="rstpm2"))
-    }
-    parnames(negll) <- names(init)
+    ## negll <- function(beta) {
+    ##     localargs <- args
+    ##     localargs$return_type <- "objective"
+    ##     localargs$init <- beta
+    ##     return(.Call("aft_model_output", localargs, PACKAGE="aftTMB"))
+    ## }
+    ## parnames(negll) <- names(init)
     ## MLE
-    fit <- .Call("aft_model_output", args, PACKAGE="rstpm2")
-    args$init <- coef <- as.vector(fit$coef)
-    hessian <- fit$hessian
-    names(coef) <- rownames(hessian) <- colnames(hessian) <- names(init)
-    mle2 <- mle2(negll, coef, vecpar=TRUE, control=control, ..., eval.only=TRUE)
-    mle2@vcov <- if (!inherits(vcov <- try(solve(hessian)), "try-error")) vcov else matrix(NA,length(coef), length(coef))
-    mle2@details$convergence <- fit$fail # fit$itrmcd
+    p <- list(beta=args$init[1:ncol(args$X)],
+              betas=args$init[-(1:ncol(args$X))])
+    f <- MakeADFun(data=list(X=args$X, XD=args$XD, t=args$time, event=args$event, boundaryKnots=attr(design,"Boundary.knots"),
+                             interiorKnots=attr(design,"knots"), q_matrix=t(attr(design,"q.const"))), parameters=p, DLL="aftTMB", silent=TRUE)
+    args$f <- f
+    ## optimisation
+    ## optim1 <- optim(init, f$fn, f$gr, hessian=TRUE, method="BFGS", ...)
+    ##fit <- .Call("aft_model_output", args, PACKAGE="aftTMB")
+    ##args$init <- coef <- as.vector(fit$coef)
+    ##hessian <- fit$hessian
+    ##names(coef) <- rownames(hessian) <- colnames(hessian) <- names(init)
+    ##mle2 <- mle2(negll, coef, vecpar=TRUE, control=control, ..., eval.only=TRUE)
+    parnames(f$fn) <- names(init)
+    ## mle2 <- mle2(minuslogl=f$fn, start=init, optimizer="nlm", gr=f$gr, vecpar=TRUE, ...)
+    mle2 <- mle2(minuslogl=f$fn, start=init, method="BFGS", gr=f$gr, vecpar=TRUE, control=control, ...)
+    ## mle2@vcov <- if (!inherits(vcov <- try(solve(hessian)), "try-error")) vcov else matrix(NA,length(coef), length(coef))
+    ##mle2@details$convergence <- fit$fail # fit$itrmcd
     out <- as(mle2, "aft")
     out@args <- args
     return(out)
   }
+
+if (FALSE) {
+    library(aftTMB)
+    system.time(fit1 <- aftTMB::aft(Surv(rectime/365.24,censrec==1)~hormon,data=brcancer,df=3))
+    library(survival)
+    plot(survfit(Surv(rectime/365.24,censrec==1)~hormon,data=brcancer),col=1:2)
+    plot(fit1,newdata=data.frame(hormon=0),line.col=1,add=TRUE)
+    plot(fit1,newdata=data.frame(hormon=1),line.col=2,add=TRUE)
+    library(rstpm2)
+    system.time(fit2 <- rstpm2::aft(Surv(rectime/365.24,censrec==1)~hormon,data=brcancer,df=3))
+    plot(fit2,newdata=data.frame(hormon=0),line.col="green",add=TRUE)
+    plot(fit2,newdata=data.frame(hormon=1),line.col="green",add=TRUE)
+
+
+    library(aftTMB)
+    system.time(fit1 <- aftTMB::aft(Surv(rectime,censrec==1)~hormon,data=brcancer,df=3,
+                                    smooth.formula=~hormon:nsx(log(rectime),df=3)))
+    library(survival)
+    plot(survfit(Surv(rectime,censrec==1)~hormon,data=brcancer),col=1:2)
+    plot(fit1,newdata=data.frame(hormon=0),line.col=1,add=TRUE)
+    plot(fit1,newdata=data.frame(hormon=1),line.col=2,add=TRUE)
+    library(rstpm2)
+    system.time(fit2 <- rstpm2::aft(Surv(rectime,censrec==1)~hormon,data=brcancer,df=3,
+                                    smooth.formula=~hormon:nsx(log(rectime),df=3)))
+    plot(fit2,newdata=data.frame(hormon=0),line.col="green",add=TRUE)
+    plot(fit2,newdata=data.frame(hormon=1),line.col="green",add=TRUE)
+
+    plot(fit2, newdata=data.frame(hormon=0), exposed=function(data) transform(data,hormon=1), type="accfac")
+
+    system.time(fit0 <- aftTMB::aft(Surv(rectime,censrec==1)~hormon,data=brcancer,df=3))
+    system.time(fit1 <- aftTMB::aft(Surv(rectime,censrec==1)~hormon,data=brcancer,df=3,
+                                    smooth.formula=~hormon:nsx(log(rectime),df=3)))
+    anova(fit0,fit1)
+    
+}    
 
 setMethod("predict", "aft",
           function(object,newdata=NULL,
@@ -444,7 +493,6 @@ setMethod("predict", "aft",
                   attr(pred,"newdata") <- newdata
               return(pred)
           })
-
 plot.aft.meansurv <- function(x, y=NULL, times=NULL, newdata=NULL, type="meansurv", exposed=NULL, add=FALSE, ci=!add, rug=!add, recent=FALSE,
                           xlab=NULL, ylab=NULL, lty=1, line.col=1, ci.col="grey", seqLength=301, ...) {
     ## if (is.null(times)) stop("plot.meansurv: times argument should be specified")
@@ -501,7 +549,6 @@ plot.aft.meansurv <- function(x, y=NULL, times=NULL, newdata=NULL, type="meansur
     }
     return(invisible(y))
 }
-
 plot.aft.base <- 
           function(x,y,newdata=NULL,type="surv",
                    xlab=NULL,ylab=NULL,line.col=1,ci.col="grey",lty=par("lty"),
@@ -555,13 +602,12 @@ setMethod("plot", signature(x="aft", y="missing"),
                               ylab=ylab, line.col=line.col, lty=lty, add=add,
                               ci=ci, rug=rug, var=var, exposed=exposed, times=times, ...)
           )
-
 predictSurvival.aft <- function(obj, time=obj@args$time, X=obj@args$X) {
     localargs <- obj@args
     localargs$return_type <- "survival"
     localargs$X <- X
     localargs$time <- time
-    as.vector(.Call("aft_model_output", localargs, PACKAGE="rstpm2"))
+    as.vector(.Call("aft_model_output", localargs, PACKAGE="aftTMB"))
     }
 
 ## simulate from Weibull with one binary covariate
